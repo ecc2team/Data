@@ -1,0 +1,9 @@
+# 데이터 처리 및 분석
+pandas
+numpy
+scikit-learn
+
+# AI 모델 및 텍스트 임베딩 (Hugging Face / PyTorch)
+torch
+transformers
+sentence-transformers
