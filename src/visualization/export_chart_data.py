@@ -1,76 +1,82 @@
+import os
 import pandas as pd
+from pathlib import Path
 
-from src.config import CHARTS_DIR, DATA_DIR, OUTPUTS_DIR, ensure_dir
-from src.process.merge_whitelist_v4 import build_base_dataset
+# 프로젝트 루트(zeropick) 탐색
+current_path = Path(__file__).resolve() if '__file__' in locals() else Path.cwd().resolve()
+BASE_DIR = current_path
+while BASE_DIR != BASE_DIR.parent:
+    if (BASE_DIR / "data").exists():
+        break
+    BASE_DIR = BASE_DIR.parent
+else:
+    BASE_DIR = Path.cwd().resolve().parent if (Path.cwd().name == 'src') else Path.cwd().resolve()
 
-SUGAR_THRESHOLD = 0.5
+DATA_DIR = BASE_DIR / "data"
+PROCESSED_DIR = DATA_DIR / "processed"
+INTERIM_DIR = DATA_DIR / "interim"
 
-SWEETENER_SYNONYMS = {
-    "스테비아": ["스테비아", "스테비올배당체"],
-    "에리스리톨": ["에리스리톨"],
-    "알룰로스": ["알룰로스", "알룰로오스"],
-    "나한과": ["나한과", "나한과추출물"],
-    "수크랄로스": ["수크랄로스"],
-    "아스파탐": ["아스파탐"],
-    "말티톨": ["말티톨"],
-    "자일리톨": ["자일리톨"],
-    "이소말트": ["이소말트"],
-    "아세설팜칼륨": ["아세설팜칼륨", "아세설팜K"],
-}
+def export_chart_datasets():
+    # 1순위: 등급 정보가 포함된 base_data_v4 파일 지정
+    input_path = PROCESSED_DIR / "zeropick_base_data_v4.csv"
+    if not input_path.exists():
+        input_path = PROCESSED_DIR / "integrated_final_validation.csv"
+    
+    if not input_path.exists():
+        print(f"[오류] 데이터 파일을 찾을 수 없습니다. 경로를 확인해주세요: {PROCESSED_DIR}")
+        return
 
+    df = pd.read_csv(input_path)
+    print(f"데이터 로드 완료: {input_path.name} (총 {len(df):,}행)")
 
-def load_filtered_base_dataset() -> pd.DataFrame:
-    base_path = OUTPUTS_DIR / "zeropick_base_data_v4.csv"
-    if not base_path.exists():
-        print(f"[chart data] 기준 데이터가 없어 새로 생성합니다: {base_path}")
-        base_df = build_base_dataset(DATA_DIR / "food_nutrition_raw.csv", DATA_DIR / "prdlst_rawmtrl_raw.csv")
-        base_df.to_csv(base_path, index=False, encoding="utf-8-sig")
-        print(f"[chart data] 생성 완료: {base_path} ({len(base_df)}행)")
-    else:
-        print(f"[chart data] 기존 기준 데이터 사용: {base_path}")
-
-    df = pd.read_csv(base_path, dtype={"품목제조보고번호": str}, low_memory=False)
-    for col in ["당류", "에너지"]:
+    # 컬럼명 유연성 확보 ('최종등급'이 없으면 대체 컬럼 탐색)
+    grade_col = None
+    for col in ["최종등급", "grade", "판정등급", "v4_grade"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            grade_col = col
+            break
 
-    return df.dropna(subset=["당류", "에너지"]).copy()
+    if grade_col is None:
+        print(f"[오류] 등급을 나타내는 컬럼을 찾을 수 없습니다. 현재 파일의 컬럼 목록: {df.columns.tolist()}")
+        return
 
+    # -------------------------------------------------------------
+    # Chart 1: 3등급(위험/가짜 제로) 제품들의 카테고리별 칼로리/당류 분포 분석
+    # -------------------------------------------------------------
+    grade_3_df = df[df[grade_col] == 3].copy()
+    if not grade_3_df.empty:
+        grade_3_df["고위험_이상치"] = (grade_3_df["당류"] >= 0.5) | (grade_3_df["에너지"] >= 100)
+        
+        cols_chart1 = ["품목제조보고번호", "식품대분류", "식품명", "당류", "에너지", "고위험_이상치"]
+        chart1_df = grade_3_df[[col for col in cols_chart1 if col in grade_3_df.columns]]
+        
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        chart1_output = PROCESSED_DIR / "chart1_scatter_data.csv"
+        chart1_df.to_csv(chart1_output, index=False, encoding="utf-8-sig")
+        print(f"✅ Chart 1 데이터 저장 완료: {chart1_output} (총 {len(chart1_df):,}행)")
+    else:
+        print("[경고] 3등급(위험/가짜 제로)으로 분류된 데이터가 없습니다.")
 
-def main():
-    df = load_filtered_base_dataset()
-
-    zero = df[df["당류"] < SUGAR_THRESHOLD].copy()
-    zero["칼로리이상치"] = False
-    for cat, group in zero.groupby("식품대분류"):
-        cutoff = group["에너지"].quantile(0.90)
-        zero.loc[group.index, "칼로리이상치"] = group["에너지"] >= cutoff
-
-    scatter_cols = ["식품명", "식품대분류", "당류", "에너지", "칼로리이상치"]
-    ensure_dir(CHARTS_DIR)
-    zero[scatter_cols].to_csv(CHARTS_DIR / "chart1_scatter_data.csv", index=False, encoding="utf-8-sig")
-    print(f"[1] {CHARTS_DIR / 'chart1_scatter_data.csv'} 저장 ({len(zero)}행)")
-    print(f"    칼로리 이상치(카테고리 내 상위 10%): {zero['칼로리이상치'].sum()}개")
-
-    ingredient_col = "표준원재료명" if "표준원재료명" in df.columns else "RAWMTRL_NM"
-    rows = []
-    for cat, group in df.groupby("식품대분류"):
-        for canonical, synonyms in SWEETENER_SYNONYMS.items():
-            pattern = "|".join(synonyms)
-            count = group[ingredient_col].astype(str).str.contains(pattern, na=False).sum()
-            if count > 0:
-                rows.append({
-                    "식품대분류": cat,
-                    "대체당": canonical,
-                    "건수": count,
-                    "비율(%)": round(count / len(group) * 100, 1),
+    # -------------------------------------------------------------
+    # Chart 2: 카테고리별 대체당 사용 빈도 (히트맵용)
+    # -------------------------------------------------------------
+    sweeteners = ["알룰로스", "스테비아", "에리스리톨", "나한과", "스테비올배당체", "수크랄로스", "아세설팜칼륨", "아스파탐"]
+    
+    chart2_rows = []
+    if "식품대분류" in df.columns and "RAWMTRL_NM" in df.columns:
+        for category, group in df.groupby("식품대분류"):
+            for sw in sweeteners:
+                count = group["RAWMTRL_NM"].astype(str).str.contains(sw, na=False).sum()
+                chart2_rows.append({
+                    "식품대분류": category,
+                    "대체당": sw,
+                    "건수": count
                 })
-
-    trend_df = pd.DataFrame(rows).sort_values(["식품대분류", "건수"], ascending=[True, False])
-    trend_df.to_csv(CHARTS_DIR / "chart2_sweetener_trend.csv", index=False, encoding="utf-8-sig")
-    print(f"\n[2] chart2_sweetener_trend.csv 저장")
-    print(trend_df.pivot(index="식품대분류", columns="대체당", values="건수").fillna(0).astype(int))
-
+        
+        chart2_df = pd.DataFrame(chart2_rows)
+        chart2_output = PROCESSED_DIR / "chart2_sweetener_trend.csv"
+        chart2_df.to_csv(chart2_output, index=False, encoding="utf-8-sig")
+        print(f"✅ Chart 2 데이터 저장 완료: {chart2_output}")
 
 if __name__ == "__main__":
-    main()
+    export_chart_datasets()

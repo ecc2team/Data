@@ -1,25 +1,40 @@
+import sys
+import os
+from pathlib import Path
+
+# === [Colab & Local 공통] 경로 인식 에러 방지 ===
+current_path = Path.cwd()
+if current_path.name == "zeropick":
+    PROJECT_ROOT = current_path
+else:
+    # Colab에서 실행 시 현재 경로가 다를 경우를 대비한 방어 코드
+    PROJECT_ROOT = current_path / "zeropick" if (current_path / "zeropick").exists() else current_path
+sys.path.append(str(PROJECT_ROOT))
+
 import pandas as pd
 import numpy as np
 import torch
-import sys
 from transformers import pipeline
 
-from src.config import OUTPUTS_DIR, ensure_dir
+try:
+    from src.config import DATA_DIR, OUTPUTS_DIR, ensure_dir
+except ImportError:
+    # config를 못 찾을 경우 임시로 경로 생성 (Colab 단독 테스트용 방어선)
+    DATA_DIR = Path("data")
+    OUTPUTS_DIR = Path("outputs")
+    def ensure_dir(path):
+        Path(path).mkdir(parents=True, exist_ok=True)
 
-print("=== [시스템 실행 개시] 라이브러리 로드 완료 ===")
+print("=== [시스템 실행 개시] 라이브러리 및 경로 설정 완료 ===")
 
-                                                           
-                                          
-                                                           
 def run_zero_shot_comparison(df: pd.DataFrame, sample_size: int = 200):
     """
     mDeBERTa 기반 Zero-shot 분류를 수행하고 룰 기반 평가와의 일치율을 계산합니다.
     """
-                            
     try:
         if torch.cuda.is_available():
             device = 0
-            device_name = "CUDA (NVIDIA GPU)"
+            device_name = "CUDA (NVIDIA GPU - Colab T4 추천)"
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             device = "mps"
             device_name = "MPS (Mac Apple Silicon)"
@@ -28,11 +43,10 @@ def run_zero_shot_comparison(df: pd.DataFrame, sample_size: int = 200):
             device_name = "CPU"
     except Exception as e:
         device = -1
-        device_name = f"CPU (디바이스 감지 예외로 인한 fallback: {e})"
+        device_name = f"CPU (디바이스 감지 예외: {e})"
 
     print(f"\n1. 다국어 Zero-shot 모델 로드 중... (사용 감지 기기: {device_name})")
     
-                 
     classifier = pipeline(
         "zero-shot-classification", 
         model="MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
@@ -46,32 +60,27 @@ def run_zero_shot_comparison(df: pd.DataFrame, sample_size: int = 200):
         "당류 및 인공첨가물이 많은 원재료": "Bad"
     }
     
-           
     target_df = df.sample(n=min(sample_size, len(df)), random_state=42).copy() if sample_size else df.copy()
     print(f"2. 총 {len(target_df)}개 제품 원재료에 대해 Zero-shot 판정 진행 중...")
     
-                
     if "표준원재료명" in target_df.columns:
         raw_texts = target_df["표준원재료명"].fillna("").astype(str).str.strip()
     else:
         raw_texts = target_df["RAWMTRL_NM"].fillna("").astype(str).str.strip()
+        
     valid_mask = raw_texts != ""
     texts_to_infer = raw_texts[valid_mask].str.slice(0, 250).tolist()
     
-                         
     batch_results = []
     if texts_to_infer:
         print(f"   └ 유효 텍스트 {len(texts_to_infer)}건 추론 시작 (Batch Size: 16)...")
-                                                              
         results = classifier(texts_to_infer, candidate_labels, batch_size=16)
         
-                              
         if isinstance(results, dict):
             results = [results]
             
         batch_results = [label_mapping[res['labels'][0]] for res in results]
     
-                         
     ai_results = []
     result_idx = 0
     for is_valid in valid_mask:
@@ -83,7 +92,6 @@ def run_zero_shot_comparison(df: pd.DataFrame, sample_size: int = 200):
             
     target_df["AI_판정"] = ai_results
     
-            
     if "룰기반_등급" in target_df.columns:
         match_rate = (target_df["룰기반_등급"] == target_df["AI_판정"]).mean() * 100
         print(f"\n[Step 3 결과] 룰 기반 vs AI 판정 일치율: {match_rate:.2f}%")
@@ -92,13 +100,9 @@ def run_zero_shot_comparison(df: pd.DataFrame, sample_size: int = 200):
         
     return target_df
 
-                                                           
-                            
-                                                           
 def integrate_and_revalidate(df_with_ai: pd.DataFrame):
     print("\n3. 통합 검증 (Rule + AI Cross Validation) 진행 중...")
     
-                 
     rule_col = "제로유형" if "제로유형" in df_with_ai.columns else None
     
     if rule_col:
@@ -123,23 +127,24 @@ def integrate_and_revalidate(df_with_ai: pd.DataFrame):
     
     return df_with_ai
 
-                                            
-            
-                                            
 if __name__ == "__main__":
-    INPUT_FILE = OUTPUTS_DIR / "zeropick_final_graded.csv"             
+    # 입력 파일 경로 설정 (outputs/ 또는 data/processed/ 중 실제 파일이 있는 곳 확인)
+    INPUT_FILE = OUTPUTS_DIR / "zeropick_final_graded.csv" 
     
+    # 만약 outputs에 없다면 processed 폴더도 함께 탐색
+    if not INPUT_FILE.exists():
+        alt_input = DATA_DIR / "processed" / "zeropick_final_graded.csv"
+        if alt_input.exists():
+            INPUT_FILE = alt_input
+
     print(f"파일 로딩 시도: {INPUT_FILE}")
     try:
         df = pd.read_csv(INPUT_FILE)
         print(f"데이터 로드 완료! (총 {len(df)}행)")
     except FileNotFoundError:
-        print(f"[오류] '{INPUT_FILE}' 파일을 찾을 수 없습니다. 파일명을 확인해 주세요.")
+        print(f"[오류] '{INPUT_FILE}' 파일을 찾을 수 없습니다. 이전 단계(룰 기반 등급 분류)가 정상 실행되어 파일이 생성되었는지 확인해 주세요.")
         sys.exit(1)
         
-                                       
     df_step3 = run_zero_shot_comparison(df, sample_size=200)
-    
-               
     df_step4 = integrate_and_revalidate(df_step3)
     print("\n=== 모든 작업이 정상 종료되었습니다 ===")
