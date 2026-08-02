@@ -175,9 +175,12 @@ def evaluate_zero_products(df: pd.DataFrame) -> pd.DataFrame:
 def build_base_dataset(nutrition_path, c002_path) -> pd.DataFrame:
     nutrition = load_nutrition(nutrition_path)
     c002 = load_c002(c002_path)
+    print(f"[join 전] nutrition(dropna 이후): {len(nutrition)}건")
+    print(f"[join 전] c002(품목번호 기준 groupby 이후): {len(c002)}건")
     
     c002_cols = ["품목제조보고번호", "PRDLST_NM", "BSSH_NM", "RAWMTRL_NM", "PRDLST_DCNM"]
     base_data = nutrition.merge(c002[c002_cols], on="품목제조보고번호", how="inner")
+    print(f"[join 후] base_data: {len(base_data)}건")
     
     base_data = evaluate_zero_products(base_data)
 
