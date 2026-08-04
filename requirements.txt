@@ -2,6 +2,11 @@
 pandas
 numpy
 scikit-learn
+psycopg2-binary
+requests
+
+# 환경 변수 로딩
+python-dotenv
 
 # AI 모델 및 텍스트 임베딩 (Hugging Face / PyTorch)
 torch

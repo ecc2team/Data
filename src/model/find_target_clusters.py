@@ -1,6 +1,6 @@
 import pandas as pd
 
-from path_config import OUTPUTS_DIR
+from src.config import OUTPUTS_DIR
 
 def find_target_clusters(file_path: str, keywords: list):
     try:

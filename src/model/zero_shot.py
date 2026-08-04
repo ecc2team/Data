@@ -1,29 +1,11 @@
 import sys
-import os
-from pathlib import Path
 
-# === [Colab & Local 공통] 경로 인식 에러 방지 ===
-current_path = Path.cwd()
-if current_path.name == "zeropick":
-    PROJECT_ROOT = current_path
-else:
-    # Colab에서 실행 시 현재 경로가 다를 경우를 대비한 방어 코드
-    PROJECT_ROOT = current_path / "zeropick" if (current_path / "zeropick").exists() else current_path
-sys.path.append(str(PROJECT_ROOT))
-
-import pandas as pd
 import numpy as np
+import pandas as pd
 import torch
 from transformers import pipeline
 
-try:
-    from src.config import DATA_DIR, OUTPUTS_DIR, ensure_dir
-except ImportError:
-    # config를 못 찾을 경우 임시로 경로 생성 (Colab 단독 테스트용 방어선)
-    DATA_DIR = Path("data")
-    OUTPUTS_DIR = Path("outputs")
-    def ensure_dir(path):
-        Path(path).mkdir(parents=True, exist_ok=True)
+from src.config import DATA_DIR, OUTPUTS_DIR, ensure_dir
 
 print("=== [시스템 실행 개시] 라이브러리 및 경로 설정 완료 ===")
 

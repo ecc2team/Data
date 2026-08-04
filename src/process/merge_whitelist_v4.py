@@ -150,11 +150,17 @@ def evaluate_zero_products(df: pd.DataFrame) -> pd.DataFrame:
     is_fake_zero_sug = has_sug_claim & (~pass_sugar)
     is_fake_zero = is_fake_zero_cal | is_fake_zero_sug
 
+    # 표기도 없고 감미료도 전혀 안 쓴 상태에서 당류/칼로리 수치만 자연적으로 낮은 제품
+    # (생수, 블랙커피, 탄산수 등). build_base_dataset()이 is_relevant_to_zero_marketing()으로
+    # 표기·감미료가 둘 다 없는 행을 이미 앞단에서 제외하므로, 여기 도달하는 데이터에서는
+    # is_natural_zero가 이론상 계산은 되지만 실질적으로 항상 False다 (감사/기록용으로만 유지).
     is_natural_zero = pass_sugar & pass_calorie & (~has_gen_claim) & (~has_cal_claim) & (~has_sug_claim) & (~has_any_sweetener)
 
     cond_grade_3 = is_fake_zero | has_blood_sugar_trap | has_additive_trap
     is_premium_ingredients = has_premium_sweetener & (~has_synthetic_sweetener)
     
+    # [참고] is_natural_zero는 build_base_dataset()의 사전 필터링 이후 항상 False이므로,
+    # 1등급 판정은 실질적으로 아래 세 조건(표기+수치+프리미엄 감미료)에 의해서만 결정된다.
     cond_grade_1 = (~cond_grade_3) & (
         is_natural_zero | 
         (has_cal_claim & pass_sugar & pass_calorie & is_premium_ingredients) |
@@ -172,6 +178,26 @@ def evaluate_zero_products(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def is_relevant_to_zero_marketing(df: pd.DataFrame) -> pd.Series:
+    """
+    제로 마케팅 표기('제로'/'무설탕'/'슈가프리' 등)가 있거나,
+    원재료에 대체당(프리미엄/합성 감미료, 혈당 트랩 성분)이 하나라도 포함된 제품만 True.
+    즉 이 프로젝트의 분석 목적("제로 표기, 정말 믿을 수 있는가?")과 관련 있는 제품인지 여부.
+
+    생수, 블랙커피처럼 표기도 없고 감미료도 전혀 안 쓴 '자연 무당 제품'은 False가 되어
+    build_base_dataset()에서 제외된다. (당류/칼로리 수치는 이 판별과 무관 — 그건 등급 기준이다)
+    """
+    food_names = df["식품명"].fillna("").astype(str)
+    raw_materials = df["RAWMTRL_NM"].fillna("").astype(str)
+
+    has_cal_claim = food_names.str.contains("|".join(ZERO_CAL_KEYWORDS), regex=True)
+    has_sug_claim = food_names.str.contains("|".join(ZERO_SUG_KEYWORDS), regex=True)
+    has_gen_claim = food_names.str.contains("|".join(GENERAL_ZERO_KEYWORDS), regex=True)
+    has_any_sweetener = raw_materials.str.contains(
+        "|".join(PREMIUM_SWEETENERS + SYNTHETIC_SWEETENERS + BLOOD_SUGAR_TRAPS), regex=True
+    )
+    return has_cal_claim | has_sug_claim | has_gen_claim | has_any_sweetener
+
 def build_base_dataset(nutrition_path, c002_path) -> pd.DataFrame:
     nutrition = load_nutrition(nutrition_path)
     c002 = load_c002(c002_path)
@@ -181,7 +207,17 @@ def build_base_dataset(nutrition_path, c002_path) -> pd.DataFrame:
     c002_cols = ["품목제조보고번호", "PRDLST_NM", "BSSH_NM", "RAWMTRL_NM", "PRDLST_DCNM"]
     base_data = nutrition.merge(c002[c002_cols], on="품목제조보고번호", how="inner")
     print(f"[join 후] base_data: {len(base_data)}건")
-    
+
+    # === [핵심 수정] 자연 무당 제품(생수·블랙커피 등) 제외 ===
+    # 등급화(evaluate_zero_products) 이전에, 제로 표기도 없고 대체당도 전혀 안 쓴
+    # 제품(=이 프로젝트 분석 목적과 무관한 제품)을 먼저 제외한다.
+    n_before_exclude = len(base_data)
+    relevant_mask = is_relevant_to_zero_marketing(base_data)
+    excluded_count = int((~relevant_mask).sum())
+    base_data = base_data[relevant_mask].copy()
+    print(f"[자연 무당 제품 제외] {excluded_count}건 제외 (제외 전 {n_before_exclude}건) "
+          f"→ 최종 타겟 {len(base_data)}건 확정")
+
     base_data = evaluate_zero_products(base_data)
 
     cluster_df, alias_map = create_cluster_aliases(base_data)

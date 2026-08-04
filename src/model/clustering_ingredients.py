@@ -2,7 +2,7 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import AgglomerativeClustering
 
-from path_config import OUTPUTS_DIR, ensure_dir
+from src.config import OUTPUTS_DIR, ensure_dir
 
 def run_clustering(input_file: str, output_file: str):
     print("1. 기초 데이터 로드 및 원재료 분리 중...")

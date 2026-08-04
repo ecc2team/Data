@@ -3,7 +3,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics.pairwise import cosine_similarity
 
-from path_config import OUTPUTS_DIR, ensure_dir
+from src.config import OUTPUTS_DIR, ensure_dir
 
 def run_embedding_clustering(unclassified_ingredients: list):
     """

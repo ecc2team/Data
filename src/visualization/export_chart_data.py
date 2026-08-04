@@ -1,20 +1,8 @@
-import os
 import pandas as pd
-from pathlib import Path
 
-# 프로젝트 루트(zeropick) 탐색
-current_path = Path(__file__).resolve() if '__file__' in locals() else Path.cwd().resolve()
-BASE_DIR = current_path
-while BASE_DIR != BASE_DIR.parent:
-    if (BASE_DIR / "data").exists():
-        break
-    BASE_DIR = BASE_DIR.parent
-else:
-    BASE_DIR = Path.cwd().resolve().parent if (Path.cwd().name == 'src') else Path.cwd().resolve()
+from src.config import DATA_DIR
 
-DATA_DIR = BASE_DIR / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
-INTERIM_DIR = DATA_DIR / "interim"
 
 def export_chart_datasets():
     # 1순위: 등급 정보가 포함된 base_data_v4 파일 지정

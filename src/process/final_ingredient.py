@@ -1,11 +1,5 @@
-import sys
-from pathlib import Path
 import pandas as pd
 import numpy as np
-
-# 1. ModuleNotFoundError 원천 차단
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.append(str(PROJECT_ROOT))
 
 from src.config import DATA_DIR, ensure_dir
 

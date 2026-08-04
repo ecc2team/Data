@@ -1,9 +1,11 @@
 import os
 import platform
-import pandas as pd
+
 import matplotlib.pyplot as plt
+import pandas as pd
 import seaborn as sns
-from pathlib import Path
+
+from src.config import DATA_DIR, OUTPUTS_DIR, ensure_dir
 
 if platform.system() == 'Darwin':
     plt.rc('font', family='AppleGothic')
@@ -14,19 +16,8 @@ else:
 
 plt.rcParams['axes.unicode_minus'] = False
 
-current_path = Path(__file__).resolve() if '__file__' in locals() else Path.cwd().resolve()
-BASE_DIR = current_path
-while BASE_DIR != BASE_DIR.parent:
-    if (BASE_DIR / "data").exists():
-        break
-    BASE_DIR = BASE_DIR.parent
-else:
-    BASE_DIR = Path.cwd().resolve().parent if (Path.cwd().name == 'src') else Path.cwd().resolve()
-
-DATA_DIR = BASE_DIR / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
-OUTPUTS_DIR = BASE_DIR / "outputs"
-OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+ensure_dir(OUTPUTS_DIR)
 
 def draw_chart1_scatter():
     file_path = PROCESSED_DIR / "chart1_scatter_data.csv"
