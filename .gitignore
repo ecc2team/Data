@@ -18,7 +18,8 @@ env/
 *.p12
 
 # Local data and generated outputs
-*.csv
+# Keep data files in the repository visible by default.
+# Large binary or generated artifacts can be added selectively if needed.
 *.parquet
 *.xlsx
 *.png
