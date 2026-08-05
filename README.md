@@ -94,7 +94,7 @@ python src/process/merge_whitelist_v4.py
 python src/process/zeropick_final_graded.py
 ```
 
-이 단계에서 `outputs/integrated_final_validation.csv`가 생성됩니다.
+이 단계에서 `data/processed/integrated_final_validation.csv`가 생성됩니다.
 
 ### 4.4 DB 적재용 데이터 생성
 
