@@ -2,13 +2,28 @@
 Supabase 통합 로더.
 
 ingredient.csv, product_table_data.csv, product_ingredient_mapping.csv
-3개 파일을 FK 순서(ingredient/category -> product -> product_ingredient)에
-맞춰 한 번에 적재한다.
+3개 파일을 FK 순서에 맞춰 적재하고, 마지막으로 product.score/summary까지
+계산해서 채우는 5단계 파이프라인을 한 번에 실행한다.
 
-기존에는 load_product_table_data_to_db.py / load_product_ingredient_mapping_to_db.py
-2개로 나뉘어 있었고, ingredient 자체를 Supabase에 넣는 스크립트는 따로
-없었음(로컬 Docker용 load_to_local_db.py만 있었는데 그건 삭제됨). 이 스크립트가
-그 3개 파일을 모두 커버한다.
+  1. ingredient 적재
+  2. category 적재(upsert) + category_id 매핑
+  3. product 적재 (score/summary는 임시 placeholder로 채움 - 아래 설명)
+  4. product_ingredient 적재
+  5. product.score / product.summary 계산 및 UPDATE (구 product_score.py)
+
+score/summary를 마지막 단계로 분리한 이유
+----------------------------------------
+product.score/summary 계산은 product_ingredient 매핑이 몇 개 붙어있는지
+(premium_count/warning_count)를 기준으로 하는 로직이라, product_ingredient가
+먼저 다 들어가 있어야 정확히 계산된다. 그런데 product.score/summary 컬럼은
+DDL상 NOT NULL이라 3단계(product insert) 시점에 값이 없으면 그 자체로
+insert가 실패한다. 그래서:
+  - 3단계에서는 score=0, summary=''로 임시 채워서 NOT NULL만 통과시키고
+  - 4단계(product_ingredient)까지 다 넣은 뒤
+  - 5단계에서 실제 계산값으로 UPDATE 한다.
+중간에 스크립트가 5단계 전에 죽으면 score=0/summary=''인 상태로 남을 수
+있으니, 실패 시 5단계부터 재실행하면 된다(product/product_ingredient는
+그대로 두고 score만 다시 계산하면 되므로 --no-truncate와 함께 사용).
 
 재실행 안전성
 ------------
@@ -17,7 +32,18 @@ uk_ingredient_code, uk_product_external_code, uk_product_ingredient 유니크
 제약 위반으로 실패한다. 그래서 이 스크립트는 매 실행마다 기존 데이터를
 자식->부모 순으로 먼저 비우고(product_ingredient -> product -> ingredient),
 그다음 부모->자식 순으로 다시 채운다. --no-truncate 옵션을 주면 이 초기화를
-건너뛰고 이어서 INSERT만 시도한다(빈 테이블에 처음 적재할 때만 사용 권장).
+건너뛰고 이어서 INSERT만 시도한다(빈 테이블 최초 적재, 혹은 5단계만 다시
+돌리고 싶을 때 사용).
+
+score/summary 계산 방식 (5단계, 구 product_score.py 로직 그대로)
+------------------------------------------------------------
+1. product.grade(1~3)로 점수 밴드를 정함: 1->90~100, 2->70~89, 3->40~69
+2. 밴드 안에서 ingredient.risk_level 분포(PREMIUM/WARNING 개수)를
+   log1p로 점감시켜 세부 점수를 조정
+3. warning_additive면 밴드 안에서 추가 감점 (밴드를 벗어나진 않음)
+4. ALLERGEN 타입(우유/계란/밀/대두/땅콩/아몬드/호두/복숭아)은 COLOR와
+   동일하게 premium/warning 집계에서 제외 - 알레르기 유무는 개인화
+   정보라 전체 상품 점수에 섞이면 안 됨
 
 category_id 매핑
 ----------------
@@ -38,12 +64,13 @@ category 테이블을 먼저 upsert(이미 있는 이름은 재사용, 없으면
 
 사용법
 ------
-python src/loader/load_all_to_supabase.py            # 기존 데이터 정리 후 전체 재적재
-python src/loader/load_all_to_supabase.py --no-truncate   # 정리 없이 바로 insert (빈 테이블 최초 적재용)
+python src/loader/load_all_to_supabase.py                # 기존 데이터 정리 후 전체 재적재 (1~5단계)
+python src/loader/load_all_to_supabase.py --no-truncate   # 정리 없이 이어서 insert (빈 테이블 최초 적재, 또는 재시도용)
 """
 
 import argparse
 import io
+import math
 import os
 import sys
 from pathlib import Path
@@ -62,10 +89,22 @@ PRODUCT_CSV = PROCESSED_DATA_DIR / "product_table_data.csv"
 MAPPING_CSV = PROCESSED_DATA_DIR / "product_ingredient_mapping.csv"
 
 INGREDIENT_COLUMNS = ["code", "name", "ingredient_type", "risk_level", "summary", "description"]
+# score/summary는 3단계에서 placeholder(0, '')로 채워서 NOT NULL만 통과시키고,
+# 5단계에서 실제 값으로 UPDATE함 (파일 상단 설명 참고)
 PRODUCT_COLUMNS = [
     "category_id", "external_code", "name", "raw_materials",
-    "grade", "warning_additive", "calories", "sugar", "sodium",
+    "grade", "score", "summary", "warning_additive", "calories", "sugar", "sodium",
 ]
+
+GRADE_BANDS = {1: (90, 100), 2: (70, 89), 3: (40, 69)}
+GRADE_VERDICT = {
+    1: "믿고 선택할 수 있는 프리미엄 제로 상품입니다.",
+    2: "일반적인 수준의 제로 상품입니다.",
+    3: "가짜 제로일 가능성이 있으니 성분표를 꼭 확인하세요.",
+}
+# 성분 개수가 이 percentile에 도달하면 밴드 끝(ceiling/floor)에 도달.
+# 등급별 실제 분포에서 자동으로 뽑음 (product_score.py와 동일 기준)
+SATURATION_PERCENTILE = 0.95
 
 
 # =====================================================
@@ -120,7 +159,7 @@ def truncate_all(conn) -> None:
 # 1. ingredient 적재
 # =====================================================
 def load_ingredient(conn) -> None:
-    print("\n[1/4] ingredient 적재 중...")
+    print("\n[1/5] ingredient 적재 중...")
     _assert_not_lfs_pointer(INGREDIENT_CSV)
     df = pd.read_csv(INGREDIENT_CSV, encoding="utf-8-sig")
 
@@ -137,7 +176,7 @@ def load_ingredient(conn) -> None:
 # 2. category 적재(upsert) + category_id 매핑
 # =====================================================
 def upsert_categories_and_map(conn, category_names: pd.Series) -> dict:
-    print("\n[2/4] category 적재(upsert) 중...")
+    print("\n[2/5] category 적재(upsert) 중...")
     unique_names = sorted(category_names.dropna().unique())
 
     with conn.cursor() as cur:
@@ -158,10 +197,10 @@ def upsert_categories_and_map(conn, category_names: pd.Series) -> dict:
 
 
 # =====================================================
-# 3. product 적재
+# 3. product 적재 (score/summary는 placeholder)
 # =====================================================
 def load_product(conn) -> None:
-    print("\n[3/4] product 적재 중...")
+    print("\n[3/5] product 적재 중 (score/summary는 5단계에서 계산)...")
     _assert_not_lfs_pointer(PRODUCT_CSV)
     df = pd.read_csv(PRODUCT_CSV, encoding="utf-8-sig", dtype={"external_code": str})
 
@@ -180,20 +219,24 @@ def load_product(conn) -> None:
         df = df.dropna(subset=["category_id"])
     df["category_id"] = df["category_id"].astype(int)
 
+    # NOT NULL 통과용 placeholder. 5단계에서 실제 값으로 UPDATE됨.
+    df["score"] = 0
+    df["summary"] = ""
+
     missing = set(PRODUCT_COLUMNS) - set(df.columns)
     if missing:
         raise KeyError(f"product_table_data.csv에 없는 컬럼: {missing}")
 
     copy_dataframe(conn, df, "product", PRODUCT_COLUMNS)
     conn.commit()
-    print(f"  ✅ product {len(df)}행 적재 완료")
+    print(f"  ✅ product {len(df)}행 적재 완료 (score=0, summary='' placeholder)")
 
 
 # =====================================================
 # 4. product_ingredient 적재
 # =====================================================
 def load_product_ingredient(conn) -> None:
-    print("\n[4/4] product_ingredient 적재 중...")
+    print("\n[4/5] product_ingredient 적재 중...")
     _assert_not_lfs_pointer(MAPPING_CSV)
 
     df = pd.read_csv(
@@ -246,6 +289,153 @@ def load_product_ingredient(conn) -> None:
 
 
 # =====================================================
+# 5. product.score / product.summary 계산 및 UPDATE
+#    (구 product_score.py 로직 그대로. ALLERGEN 제외 필터 반영됨)
+# =====================================================
+def fetch_product_ingredient_stats(conn) -> pd.DataFrame:
+    """
+    product당 1행. premium_count/warning_count는 score 계산용,
+    premium_names/warning_names는 summary 조립용.
+
+    NOTE: warning_count/warning_names 필터에서 COLOR와 ALLERGEN을 함께
+    제외함. ALLERGEN(우유/계란/밀/대두/땅콩/아몬드/호두/복숭아)은 risk_level이
+    WARNING이지만 개인 알레르기 정보라 전체 상품 점수에 섞이면 안 됨
+    (예: 밀가루가 384건으로 흔하다고 warning_count에 잡히면 빵류 점수가
+    알레르기 없는 사용자 기준에서도 부당하게 깎임).
+    """
+    query = """
+        SELECT
+            p.id AS product_id,
+            p.grade,
+            p.warning_additive,
+            COUNT(i.id) FILTER (WHERE i.risk_level = 'PREMIUM') AS premium_count,
+            COUNT(i.id) FILTER (
+                WHERE i.risk_level = 'WARNING' AND i.ingredient_type NOT IN ('COLOR', 'ALLERGEN')
+            ) AS warning_count,
+            COUNT(i.id) AS total_count,
+            COALESCE(
+                ARRAY_AGG(i.name) FILTER (WHERE i.risk_level = 'PREMIUM'),
+                ARRAY[]::text[]
+            ) AS premium_names,
+            COALESCE(
+                ARRAY_AGG(i.name) FILTER (
+                    WHERE i.risk_level = 'WARNING' AND i.ingredient_type NOT IN ('COLOR', 'ALLERGEN')
+                ),
+                ARRAY[]::text[]
+            ) AS warning_names
+        FROM product p
+        LEFT JOIN product_ingredient pi ON pi.product_id = p.id
+        LEFT JOIN ingredient i ON i.id = pi.ingredient_id
+        WHERE p.deleted_at IS NULL
+        GROUP BY p.id, p.grade, p.warning_additive
+    """
+    return pd.read_sql(query, conn)
+
+
+def compute_saturation_counts(df: pd.DataFrame, percentile: float = SATURATION_PERCENTILE) -> dict:
+    saturation = {}
+    for grade, sub in df.groupby("grade"):
+        p_sat = max(1, int(round(sub["premium_count"].quantile(percentile))))
+        w_sat = max(1, int(round(sub["warning_count"].quantile(percentile))))
+        saturation[grade] = (p_sat, w_sat)
+    return saturation
+
+
+def compute_score(row, saturation: dict) -> int:
+    floor, ceiling = GRADE_BANDS[row["grade"]]
+    width = ceiling - floor
+    mid = floor + width / 2
+    half_band = width / 2
+
+    premium_sat, warning_sat = saturation[row["grade"]]
+    premium_signal = math.log1p(row["premium_count"]) / math.log1p(premium_sat)
+    warning_signal = math.log1p(row["warning_count"]) / math.log1p(warning_sat)
+
+    adjustment = half_band * premium_signal - half_band * warning_signal
+    adjustment = max(-half_band, min(half_band, adjustment))
+
+    score = mid + adjustment
+    if row["warning_additive"]:
+        score -= width * 0.3
+
+    return int(max(floor, min(ceiling, round(score))))
+
+
+def is_near_saturation(row, saturation: dict) -> bool:
+    premium_sat, _ = saturation[row["grade"]]
+    return row["premium_count"] >= premium_sat
+
+
+def build_summary(row, saturation: dict) -> str:
+    premium_names = row["premium_names"] or []
+    warning_names = row["warning_names"] or []
+
+    if row["grade"] == 1 and warning_names:
+        names = ", ".join(warning_names[:2])
+        return (
+            f"{names} 등 혈당에 영향을 줄 수 있는 성분이 포함되어 있어요. "
+            f"등급은 프리미엄이지만 성분표를 한 번 더 확인해보는 걸 추천해요."
+        )
+
+    if row["warning_additive"]:
+        feature = "카라멜색소 등 우려 첨가물이 포함되어 있어"
+    elif warning_names:
+        names = ", ".join(warning_names[:2])
+        feature = f"{names} 등의 성분이 일부 포함되어 있어"
+    elif premium_names and is_near_saturation(row, saturation):
+        names = ", ".join(premium_names[:2])
+        feature = f"{names} 등 프리미엄 성분 위주로 구성되어 있어"
+    else:
+        feature = "특별한 감미료 이슈 없이 무난하게 구성되어 있어"
+
+    return f"{feature}, {GRADE_VERDICT[row['grade']]}"
+
+
+def compute_and_update_score(conn) -> None:
+    print("\n[5/5] product.score / summary 계산 및 UPDATE 중...")
+    df = fetch_product_ingredient_stats(conn)
+    print(f"  대상 product: {len(df)}건")
+
+    saturation = compute_saturation_counts(df)
+    print(f"  saturation 기준 (percentile={SATURATION_PERCENTILE}): {saturation}")
+
+    df["score"] = df.apply(lambda row: compute_score(row, saturation), axis=1)
+    df["summary"] = df.apply(lambda row: build_summary(row, saturation), axis=1)
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TEMP TABLE tmp_product_score (
+                product_id BIGINT,
+                score SMALLINT,
+                summary TEXT
+            ) ON COMMIT DROP
+        """)
+        buf = io.StringIO()
+        df[["product_id", "score", "summary"]].to_csv(buf, index=False, header=False)
+        buf.seek(0)
+        cur.copy_expert(
+            "COPY tmp_product_score (product_id, score, summary) FROM STDIN WITH (FORMAT csv)",
+            buf,
+        )
+        cur.execute("""
+            UPDATE product
+            SET score = tmp.score,
+                summary = tmp.summary
+            FROM tmp_product_score tmp
+            WHERE product.id = tmp.product_id
+        """)
+    conn.commit()
+
+    for grade, (floor, ceiling) in GRADE_BANDS.items():
+        n_grade = (df["grade"] == grade).sum()
+        n_ceiling = ((df["grade"] == grade) & (df["score"] == ceiling)).sum()
+        n_floor = ((df["grade"] == grade) & (df["score"] == floor)).sum()
+        print(f"  grade {grade}: {n_grade}건 중 ceiling({ceiling}) {n_ceiling}건 / floor({floor}) {n_floor}건")
+
+    print(f"  ✅ product {len(df)}행 score/summary 업데이트 완료")
+
+
+# =====================================================
 # 실행부
 # =====================================================
 def main() -> None:
@@ -253,7 +443,7 @@ def main() -> None:
     parser.add_argument(
         "--no-truncate",
         action="store_true",
-        help="기존 데이터 정리를 건너뛰고 바로 insert (빈 테이블 최초 적재 시에만 사용)",
+        help="기존 데이터 정리를 건너뛰고 바로 insert (빈 테이블 최초 적재, 또는 5단계 재시도용)",
     )
     args = parser.parse_args()
 
@@ -267,8 +457,9 @@ def main() -> None:
         load_ingredient(conn)
         load_product(conn)
         load_product_ingredient(conn)
+        compute_and_update_score(conn)
 
-        print("\n🎉 전체 적재 완료! (ingredient -> category -> product -> product_ingredient)")
+        print("\n🎉 전체 적재 완료! (ingredient -> category -> product -> product_ingredient -> score/summary)")
     except Exception:
         conn.rollback()
         raise
