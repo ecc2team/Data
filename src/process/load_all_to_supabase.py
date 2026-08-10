@@ -41,9 +41,15 @@ uk_ingredient_code, uk_product_external_code, uk_product_ingredient 유니크
 
 score/summary 계산 방식 (5단계)
 ------------------------------------------------------------
-1. product.grade(1~3)로 점수 밴드를 정함: 1->90~100, 2->70~89, 3->40~69
-2. 밴드 안에서 ingredient.risk_level 분포(PREMIUM/WARNING 개수)를
-   log1p로 점감시켜 세부 점수를 조정
+1. product.grade(1~3)로 점수 밴드를 정함: 1->70~100, 2->40~69, 3->0~59
+2. 밴드 안에서 ingredient.risk_level 분포를 반영하되, 단순 개수가 아니라
+   product_ingredient.sequence(원재료 표기 순서, 1이 가장 앞=최다 함량)로
+   가중합을 만들어서 씀: 1/sequence**1.75 (SEQUENCE_WEIGHT_POWER).
+   앞쪽(고함량)에 있는 성분일수록 가중치가 크고, 뒤로 갈수록 급격히 약해짐.
+   이 가중합(premium_weight/warning_weight)을 log1p로 saturation 대비
+   점감시켜 세부 점수를 조정 (예전엔 count를 그대로 썼는데, "말토덱스트린이
+   1번째로 잔뜩 들어간 제품"과 "맨 끝에 살짝 들어간 제품"이 warning_count=1로
+   동일 취급되는 문제가 있었음)
 3. warning_additive면 밴드 안에서 추가 감점 (밴드를 벗어나진 않음)
 4. ALLERGEN 타입(우유/계란/밀/대두/땅콩/아몬드/호두/복숭아)은 COLOR와
    동일하게 premium/warning 집계에서 제외 - 알레르기 유무는 개인화
@@ -110,7 +116,13 @@ PRODUCT_COLUMNS = [
     "grade", "score", "summary", "warning_additive", "calories", "sugar", "sodium",
 ]
 
-GRADE_BANDS = {1: (90, 100), 2: (70, 89), 3: (40, 69)}
+GRADE_BANDS = {1: (70, 100), 2: (40, 69), 3: (0, 59)}
+# sequence(원재료 표기 순서, 1이 가장 앞=최다 함량) 가중치 지수.
+# 값이 클수록 앞쪽 성분의 가중치가 뒤쪽 대비 급격히 커짐(=뒤로 갈수록 급격히 약화).
+# 1/sequence**SEQUENCE_WEIGHT_POWER 형태로 성분별 가중치를 매겨 premium/warning
+# count를 "가중합"으로 바꿔 쓴다. 예: power=1.75일 때 1번째=1.0, 2번째≈0.30,
+# 3번째≈0.16, 5번째≈0.076 → 앞쪽 1~2번째는 크게, 그 뒤로는 급격히 약해짐.
+SEQUENCE_WEIGHT_POWER = 1.75
 GRADE_VERDICT = {
     1: "믿고 선택할 수 있는 프리미엄 제로 상품입니다.",
     2: "일반적인 수준의 제로 상품입니다.",
@@ -310,20 +322,27 @@ def load_product_ingredient(conn) -> None:
 
 # =====================================================
 # 5. product.score / product.summary 계산 및 UPDATE
-#    (구 product_score.py 로직 그대로. ALLERGEN 제외 필터 반영됨)
+#    (ALLERGEN 제외 필터 + sequence 기반 가중치 반영)
 # =====================================================
 def fetch_product_ingredient_stats(conn) -> pd.DataFrame:
     """
-    product당 1행. premium_count/warning_count는 score 계산용,
-    premium_names/warning_names는 summary 조립용, sugar/calories는
+    product당 1행. premium_count/warning_count(및 premium_weight/warning_weight)는
+    score 계산용, premium_names/warning_names는 summary 조립용, sugar/calories는
     build_summary()에서 grade=3인데 매칭된 WARNING 성분이 없을 때 실제
     초과 여부를 설명하는 용도 (exceeds_zero_threshold() 참고).
 
-    NOTE: warning_count/warning_names 필터에서 COLOR와 ALLERGEN을 함께
-    제외함. ALLERGEN(우유/계란/밀/대두/땅콩/아몬드/호두/복숭아)은 risk_level이
-    WARNING이지만 개인 알레르기 정보라 전체 상품 점수에 섞이면 안 됨
-    (예: 밀가루가 384건으로 흔하다고 warning_count에 잡히면 빵류 점수가
-    알레르기 없는 사용자 기준에서도 부당하게 깎임).
+    premium_weight/warning_weight: product_ingredient.sequence(원재료 표기 순서,
+    1이 가장 앞=최다 함량)를 반영한 가중합. 단순 개수(count)만 보면 "말토덱스트린이
+    원재료 1번째로 잔뜩 들어갔지만 뒤쪽에 스테비아도 있는" 제품과 "스테비아 위주에
+    말토덱스트린이 맨 끝에 살짝 들어간" 제품이 warning_count=1로 동일하게 취급돼서
+    구분이 안 됐음. sequence가 앞쪽(=고함량)일수록 1/sequence**SEQUENCE_WEIGHT_POWER로
+    가중치를 크게 줘서, 같은 개수라도 warning 성분이 앞쪽에 있으면 더 큰 감점 신호가
+    나오게 함. premium 쪽도 대칭 적용(앞쪽 프리미엄 성분일수록 가점 신호 ↑).
+
+    NOTE: warning 관련 집계에서 COLOR와 ALLERGEN을 함께 제외함. ALLERGEN(우유/계란/밀/
+    대두/땅콩/아몬드/호두/복숭아)은 risk_level이 WARNING이지만 개인 알레르기 정보라
+    전체 상품 점수에 섞이면 안 됨(예: 밀가루가 흔하다고 점수에 잡히면 알레르기 없는
+    사용자 기준에서도 부당하게 깎임).
     """
     query = """
         SELECT
@@ -332,35 +351,59 @@ def fetch_product_ingredient_stats(conn) -> pd.DataFrame:
             p.warning_additive,
             p.sugar,
             p.calories,
-            COUNT(i.id) FILTER (WHERE i.risk_level = 'PREMIUM') AS premium_count,
-            COUNT(i.id) FILTER (
-                WHERE i.risk_level = 'WARNING' AND i.ingredient_type NOT IN ('COLOR', 'ALLERGEN')
-            ) AS warning_count,
-            COUNT(i.id) AS total_count,
-            COALESCE(
-                ARRAY_AGG(i.name) FILTER (WHERE i.risk_level = 'PREMIUM'),
-                ARRAY[]::text[]
-            ) AS premium_names,
-            COALESCE(
-                ARRAY_AGG(i.name) FILTER (
-                    WHERE i.risk_level = 'WARNING' AND i.ingredient_type NOT IN ('COLOR', 'ALLERGEN')
-                ),
-                ARRAY[]::text[]
-            ) AS warning_names
+            i.risk_level,
+            i.ingredient_type,
+            i.name AS ingredient_name,
+            pi.sequence
         FROM product p
         LEFT JOIN product_ingredient pi ON pi.product_id = p.id
         LEFT JOIN ingredient i ON i.id = pi.ingredient_id
         WHERE p.deleted_at IS NULL
-        GROUP BY p.id, p.grade, p.warning_additive, p.sugar, p.calories
     """
-    return pd.read_sql(query, conn)
+    raw = pd.read_sql(query, conn)
+
+    def seq_weight(seq) -> float:
+        if pd.isna(seq) or seq < 1:
+            return 0.0
+        return 1.0 / (float(seq) ** SEQUENCE_WEIGHT_POWER)
+
+    raw["is_premium"] = raw["risk_level"] == "PREMIUM"
+    raw["is_warning"] = (raw["risk_level"] == "WARNING") & (
+        ~raw["ingredient_type"].isin(["COLOR", "ALLERGEN"])
+    )
+    raw["seq_weight"] = raw["sequence"].apply(seq_weight)
+    raw["premium_weight_row"] = raw["seq_weight"].where(raw["is_premium"], 0.0)
+    raw["warning_weight_row"] = raw["seq_weight"].where(raw["is_warning"], 0.0)
+    raw["premium_name_row"] = raw["ingredient_name"].where(raw["is_premium"])
+    raw["warning_name_row"] = raw["ingredient_name"].where(raw["is_warning"])
+
+    # 벡터화된 집계(product당 원재료 수가 적어도 8000+ product 규모에서
+    # groupby().apply()보다 빠름). 그룹별 첫 값만 필요한 컬럼은 "first",
+    # 합/개수가 필요한 컬럼은 sum, 이름 리스트는 list로 모은 뒤 None 제거.
+    grouped = raw.groupby("product_id")
+    df = grouped.agg(
+        grade=("grade", "first"),
+        warning_additive=("warning_additive", "first"),
+        sugar=("sugar", "first"),
+        calories=("calories", "first"),
+        premium_count=("is_premium", "sum"),
+        warning_count=("is_warning", "sum"),
+        premium_weight=("premium_weight_row", "sum"),
+        warning_weight=("warning_weight_row", "sum"),
+        premium_names=("premium_name_row", lambda s: [n for n in s if pd.notna(n)]),
+        warning_names=("warning_name_row", lambda s: [n for n in s if pd.notna(n)]),
+    ).reset_index()
+    return df
 
 
 def compute_saturation_counts(df: pd.DataFrame, percentile: float = SATURATION_PERCENTILE) -> dict:
+    """premium_weight/warning_weight(sequence 가중합) 기준 saturation.
+    단순 개수 대신 가중합의 percentile을 써서, "앞쪽에 warning이 몰린 소수 사례"도
+    saturation 계산에 제대로 반영되게 함."""
     saturation = {}
     for grade, sub in df.groupby("grade"):
-        p_sat = max(1, int(round(sub["premium_count"].quantile(percentile))))
-        w_sat = max(1, int(round(sub["warning_count"].quantile(percentile))))
+        p_sat = max(1e-6, sub["premium_weight"].quantile(percentile))
+        w_sat = max(1e-6, sub["warning_weight"].quantile(percentile))
         saturation[grade] = (p_sat, w_sat)
     return saturation
 
@@ -372,8 +415,12 @@ def compute_score(row, saturation: dict) -> int:
     half_band = width / 2
 
     premium_sat, warning_sat = saturation[row["grade"]]
-    premium_signal = math.log1p(row["premium_count"]) / math.log1p(premium_sat)
-    warning_signal = math.log1p(row["warning_count"]) / math.log1p(warning_sat)
+    # premium_weight/warning_weight는 sequence 기반 가중합(앞쪽 성분일수록 큼).
+    # log1p로 saturation 대비 점감시키는 방식은 그대로 유지하되, 입력을 count에서
+    # 가중합으로 바꿔서 "앞쪽(고함량)에 있는 warning 성분"이 뒤쪽에 있는 것보다
+    # 훨씬 강하게 감점 신호를 만들도록 함.
+    premium_signal = math.log1p(row["premium_weight"]) / math.log1p(premium_sat)
+    warning_signal = math.log1p(row["warning_weight"]) / math.log1p(warning_sat)
 
     adjustment = half_band * premium_signal - half_band * warning_signal
     adjustment = max(-half_band, min(half_band, adjustment))
@@ -386,8 +433,10 @@ def compute_score(row, saturation: dict) -> int:
 
 
 def is_near_saturation(row, saturation: dict) -> bool:
+    # saturation이 premium_weight 기준 percentile로 바뀌었으므로 비교 대상도
+    # premium_weight로 맞춤 (count와 비교하면 단위가 안 맞아 항상 참/거짓으로 치우침).
     premium_sat, _ = saturation[row["grade"]]
-    return row["premium_count"] >= premium_sat
+    return row["premium_weight"] >= premium_sat
 
 
 def exceeds_zero_threshold(row) -> bool:
@@ -509,9 +558,16 @@ def compute_and_update_score(conn) -> None:
 
     conflicts = flag_grade_ingredient_conflicts(df)
     if len(conflicts) > 0:
-        conflicts_path = "grade_ingredient_conflicts.csv"
-        conflicts.to_csv(conflicts_path, index=False, encoding="utf-8-sig")
-        print(f"    -> 상세 내역 저장: {conflicts_path} (팀/멘토님 공유용)")
+        conflicts_path = PROCESSED_DATA_DIR / "grade_ingredient_conflicts.csv"
+        try:
+            conflicts.to_csv(conflicts_path, index=False, encoding="utf-8-sig")
+            print(f"    -> 상세 내역 저장: {conflicts_path} (팀/멘토님 공유용)")
+        except PermissionError:
+            # 파일이 엑셀 등 다른 프로그램에서 열려있으면 Windows에서 쓰기가 막힘.
+            # DB에 score/summary를 반영하는 게 이 함수의 핵심 작업이라, CSV 저장은
+            # 실패해도 전체 파이프라인은 계속 진행되게 함 (여기서 죽으면 안 됨).
+            print(f"    ⚠️  {conflicts_path} 저장 실패 (다른 프로그램에서 열려있는 듯).")
+            print("       파일을 닫고 스크립트를 다시 실행하면 저장됩니다. (score/summary는 계속 진행)")
 
     with conn.cursor() as cur:
         cur.execute("""

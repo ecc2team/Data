@@ -187,12 +187,20 @@ def is_relevant_to_zero_marketing(df: pd.DataFrame) -> pd.Series:
 
 
 def evaluate_zero_products(df: pd.DataFrame, keywords: dict[str, list[str]]) -> pd.DataFrame:
-    """제로 마케팅 식품의 영양성분 및 원재료를 바탕으로 1, 2, 3등급 판정"""
+    """제로 마케팅 식품의 영양성분 및 원재료를 바탕으로 1, 2, 3등급 판정.
+
+    NOTE: 원재료 매칭은 표준원재료명(클러스터링으로 동의어를 표준 이름 하나로 합친
+    컬럼) 기준으로 함. product_ingredient 테이블을 만드는
+    build_product_ingredient_mapping.py도 표준원재료명을 우선 사용하므로,
+    여기서도 같은 컬럼을 봐야 "grade는 성분 A가 매칭됐다고 하는데 정작
+    product_ingredient엔 없다" 같은 소스 불일치가 안 생김. 이 함수를 호출하기
+    전에 build_base_dataset()에서 표준원재료명 컬럼을 먼저 만들어 둬야 함.
+    """
     df = df.copy()
     sugars = df["당류"].fillna(999.0)
     calories = df["에너지"].fillna(999.0)
     food_names = df["식품명"].fillna("").astype(str)
-    raw_materials = df["RAWMTRL_NM"].fillna("").astype(str)
+    raw_materials = df["표준원재료명"].fillna("").astype(str)
 
     premium_sweeteners = keywords["PREMIUM_SWEETENERS"]
     synthetic_sweeteners = keywords["SYNTHETIC_SWEETENERS"]
@@ -225,14 +233,23 @@ def evaluate_zero_products(df: pd.DataFrame, keywords: dict[str, list[str]]) -> 
     # 표기도 없고 감미료도 없는데 영양성분만 낮은 자연제품 판별 (타겟 필터링에 의해 실질적으론 False)
     is_natural_zero = pass_sugar & pass_calorie & (~has_gen_claim) & (~has_cal_claim) & (~has_sug_claim) & (~has_any_sweetener) & (~has_low_claim)
 
-    # [3등급 조건]: 가짜 제로이거나, 혈당 트랩 성분이 있거나, 우려 첨가물이 있는 경우
-    cond_grade_3 = is_fake_zero | has_blood_sugar_trap | has_additive_trap
+    # 가짜 제로이면서 원재료 상 문제 성분(혈당 트랩/우려 첨가물)이 전혀 없는 케이스.
+    # 실측치(당류/칼로리)만 기준을 살짝 넘었을 뿐 원재료 구성 자체는 문제가 없다는
+    # 뜻이라, "가짜 제로 주의"의 최하위 등급(3)까지는 과하다고 보고 2등급으로 완화함.
+    # -> 이전엔 is_fake_zero 하나만으로 무조건 3등급이라, "원재료엔 프리미엄
+    #    성분만 매칭됐는데 grade는 3"인 모순이 구조적으로 발생했음.
+    is_fake_zero_only = is_fake_zero & (~has_blood_sugar_trap) & (~has_additive_trap)
+
+    # [3등급 조건]: 원재료 상 혈당 트랩/우려 첨가물이 있는 경우.
+    # (원재료 문제없이 실측치만 넘은 is_fake_zero_only는 제외 -> 2등급으로 감)
+    cond_grade_3 = has_blood_sugar_trap | has_additive_trap
 
     # 합성 감미료 없이 프리미엄 대체당만 사용한 경우
     is_premium_ingredients = has_premium_sweetener & (~has_synthetic_sweetener)
 
-    # [1등급 조건]: 3등급이 아니면서, 제로 기준치를 만족하고 프리미엄 감미료만 사용한 경우
-    cond_grade_1 = (~cond_grade_3) & (
+    # [1등급 조건]: 3등급이 아니고, 실측치 기준 초과(가짜 제로)도 아니면서,
+    # 제로 기준치를 만족하고 프리미엄 감미료만 사용한 경우
+    cond_grade_1 = (~cond_grade_3) & (~is_fake_zero) & (
         is_natural_zero |
         (has_cal_claim & pass_sugar & pass_calorie & is_premium_ingredients) |
         (has_sug_claim & pass_sugar & is_premium_ingredients) |
@@ -240,13 +257,15 @@ def evaluate_zero_products(df: pd.DataFrame, keywords: dict[str, list[str]]) -> 
         (has_low_claim & pass_sugar & is_premium_ingredients)
     )
 
-    # [2등급 조건]: 1/3등급이 아니면서, 당류 기준(pass_sugar)을 만족하거나
-    # 저당 표기(has_low_claim) 제품인 경우 (저당은 0.5g 기준 적용 대상이 아니므로,
-    # pass_sugar를 못 넘는다고 default=3으로 새면 안 됨 -> 최소 grade_2는 보장)
-    cond_grade_2 = (~cond_grade_3) & (~cond_grade_1) & (pass_sugar | has_low_claim)
+    # [2등급 조건]: 1/3등급이 아닌 나머지. is_fake_zero_only 케이스는 다른 조건과
+    # 무관하게 여기로 흡수되도록 명시적으로 OR 처리 (원래 pass_sugar 조건만
+    # 보면 is_fake_zero_sug 케이스가 pass_sugar=False라 2등급 조건을 못 만족해
+    # default=3으로 새버릴 수 있었음)
+    cond_grade_2 = (~cond_grade_3) & (~cond_grade_1) & (pass_sugar | has_low_claim | is_fake_zero_only)
 
     df["최종등급"] = np.select([cond_grade_3, cond_grade_1, cond_grade_2], [3, 1, 2], default=3)
     df["가짜제로_여부"] = is_fake_zero
+    df["가짜제로_only_실측치초과"] = is_fake_zero_only
     df["자연제로_여부"] = is_natural_zero
     df["혈당트랩_여부"] = has_blood_sugar_trap
     df["첨가물트랩_여부"] = has_additive_trap
@@ -273,15 +292,19 @@ def build_base_dataset(nutrition_path, c002_path, ingredient_path) -> pd.DataFra
     print(f"[일반/자연 식품 제외] {excluded_count}건 제외 (제외 전 {n_before_exclude}건) "
           f"→ 최종 평가 타겟 {len(base_data)}건 확정")
 
-    # 남은 타겟 제품들에 대해 등급 및 트랩 여부 평가
-    base_data = evaluate_zero_products(base_data, keywords)
-
-    # 원재료명 클러스터링을 통한 표준화
+    # 원재료명 클러스터링을 통한 표준화 (grade 평가보다 먼저 수행해야 함 -> 아래
+    # evaluate_zero_products()가 표준원재료명 기준으로 매칭하기 때문. 순서를 지키지
+    # 않으면 표준원재료명 컬럼이 없는 상태로 grade 평가가 KeyError 남)
     cluster_df, alias_map = create_cluster_aliases(base_data)
     cluster_output = PROCESSED_DATA_DIR / "ingredient_clusters_result.csv"
     cluster_df.to_csv(cluster_output, index=False, encoding="utf-8-sig")
 
     base_data["표준원재료명"] = base_data["RAWMTRL_NM"].apply(lambda value: standardize_ingredient_text(value, alias_map))
+
+    # 남은 타겟 제품들에 대해 등급 및 트랩 여부 평가 (표준원재료명 기준 매칭.
+    # build_product_ingredient_mapping.py의 product_ingredient 매핑도 표준원재료명을
+    # 우선 사용하므로, grade 판정과 실제 성분 매핑이 같은 소스를 보게 됨)
+    base_data = evaluate_zero_products(base_data, keywords)
 
     return base_data
 
