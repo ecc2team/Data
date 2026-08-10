@@ -107,6 +107,12 @@ def fetch_product_ingredient_stats(conn) -> pd.DataFrame:
     FILTER 안에서 ARRAY_AGG(i.name) FILTER (...)로 조건별 이름만 모으고,
     LEFT JOIN이라 매칭이 없는 경우 NULL이 나오므로 COALESCE로 빈 배열 처리.
     """
+    # NOTE: ingredient_type <> 'COLOR' 필터에 'ALLERGEN'을 추가로 제외함.
+    # 알레르기 유발물질(우유/계란/밀/대두/땅콩/아몬드/호두/복숭아)은 사용자 개인화
+    # 필터(user_allergy) 전용이라 product 전체 등급/점수 계산에 섞이면 안 됨
+    # (예: 밀가루가 384건으로 흔하다고 warning_count에 잡히면 빵류 점수가
+    # 알레르기 없는 사용자 기준에서도 부당하게 깎임). COLOR와 동일하게
+    # premium/warning 집계와 summary용 이름 배열 양쪽에서 제외해야 함.
     query = """
         SELECT
             p.id AS product_id,
@@ -114,7 +120,7 @@ def fetch_product_ingredient_stats(conn) -> pd.DataFrame:
             p.warning_additive,
             COUNT(i.id) FILTER (WHERE i.risk_level = 'PREMIUM') AS premium_count,
             COUNT(i.id) FILTER (
-                WHERE i.risk_level = 'WARNING' AND i.ingredient_type <> 'COLOR'
+                WHERE i.risk_level = 'WARNING' AND i.ingredient_type NOT IN ('COLOR', 'ALLERGEN')
             ) AS warning_count,
             COUNT(i.id) AS total_count,
             COALESCE(
@@ -123,7 +129,7 @@ def fetch_product_ingredient_stats(conn) -> pd.DataFrame:
             ) AS premium_names,
             COALESCE(
                 ARRAY_AGG(i.name) FILTER (
-                    WHERE i.risk_level = 'WARNING' AND i.ingredient_type <> 'COLOR'
+                    WHERE i.risk_level = 'WARNING' AND i.ingredient_type NOT IN ('COLOR', 'ALLERGEN')
                 ),
                 ARRAY[]::text[]
             ) AS warning_names

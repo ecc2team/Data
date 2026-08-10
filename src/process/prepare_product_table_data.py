@@ -1,5 +1,9 @@
+import os
+import sys
+
 import pandas as pd
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from src.config import PROCESSED_DATA_DIR
 
 # =====================================================

@@ -1,4 +1,10 @@
+import os
+import sys
+
 import pandas as pd
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from src.config import DATA_DIR, ensure_dir
 
 # 최종 기획안 반영 ingredient 마스터 데이터
 data = [
@@ -67,7 +73,44 @@ data = [
 
     ["CARAMEL_COLOR", "카라멜색소", "COLOR", "WARNING",
      "주의가 필요한 착색료",
-     "제조 과정에서 일부 우려 물질이 생성될 수 있어 과다 섭취를 권장하지 않습니다."]
+     "제조 과정에서 일부 우려 물질이 생성될 수 있어 과다 섭취를 권장하지 않습니다."],
+
+    # 🟡 ALLERGEN (알레르기 유발물질 - product.grade/score 계산에는 포함되지 않음.
+    # 사용자별 개인화 필터(user_allergy)용으로만 사용. 목록은 zeropick_base_data_v4.csv
+    # 원재료(RAWMTRL_NM) 실측 매칭 건수 기준 상위 8종만 선정 (음료/과자·빵·떡/초콜릿
+    # 카테고리 데이터셋이라 법정 21종 중 새우/게/고등어/육류/메밀/잣 등은 매칭이
+    # 거의 없어 제외함).
+    ["MILK", "우유", "ALLERGEN", "WARNING",
+     "우유 알레르기 유발 성분",
+     "우유 및 우유 단백질(버터, 치즈, 유크림, 탈지분유, 유청단백 등)을 원료로 사용했습니다. 우유 알레르기가 있다면 섭취에 주의하세요."],
+
+    ["EGG", "계란", "ALLERGEN", "WARNING",
+     "계란 알레르기 유발 성분",
+     "계란 또는 난백/난황을 원료로 사용했습니다. 계란 알레르기가 있다면 섭취에 주의하세요."],
+
+    ["WHEAT", "밀", "ALLERGEN", "WARNING",
+     "밀 알레르기 유발 성분",
+     "밀가루 및 밀 글루텐을 원료로 사용했습니다. 밀 알레르기가 있다면 섭취에 주의하세요."],
+
+    ["SOYBEAN", "대두", "ALLERGEN", "WARNING",
+     "대두 알레르기 유발 성분",
+     "대두, 대두유, 대두단백, 대두레시틴 등을 원료로 사용했습니다. 대두 알레르기가 있다면 섭취에 주의하세요."],
+
+    ["PEANUT", "땅콩", "ALLERGEN", "WARNING",
+     "땅콩 알레르기 유발 성분",
+     "땅콩 또는 땅콩가공품을 원료로 사용했습니다. 땅콩 알레르기가 있다면 섭취에 주의하세요."],
+
+    ["ALMOND", "아몬드", "ALLERGEN", "WARNING",
+     "아몬드 알레르기 유발 성분",
+     "아몬드 또는 아몬드가공품을 원료로 사용했습니다. 견과류 알레르기가 있다면 섭취에 주의하세요."],
+
+    ["WALNUT", "호두", "ALLERGEN", "WARNING",
+     "호두 알레르기 유발 성분",
+     "호두 또는 호두가공품을 원료로 사용했습니다. 견과류 알레르기가 있다면 섭취에 주의하세요."],
+
+    ["PEACH", "복숭아", "ALLERGEN", "WARNING",
+     "복숭아 알레르기 유발 성분",
+     "복숭아 또는 복숭아향을 원료로 사용했습니다. 복숭아 알레르기가 있다면 섭취에 주의하세요."],
 ]
 
 columns = [
@@ -80,6 +123,14 @@ columns = [
 ]
 
 df = pd.DataFrame(data, columns=columns)
-df.to_csv("ingredient.csv", index=False, encoding="utf-8-sig")
 
-print("✅ ingredient.csv 생성 완료!")
+# data/final/ingredient.csv로 저장 (build_zero_product_base_data.py의
+# INGREDIENT_PATH = FINAL_DATA_DIR / "ingredient.csv" 와 동일 경로).
+# 예전엔 cwd에 그냥 "ingredient.csv"로 저장해서 어디서 실행하느냐에 따라
+# 실제 참조 경로와 어긋날 수 있었음.
+FINAL_DATA_DIR = DATA_DIR / "final"
+ensure_dir(FINAL_DATA_DIR)
+output_path = FINAL_DATA_DIR / "ingredient.csv"
+df.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+print(f"✅ ingredient.csv 생성 완료! ({output_path}, {len(df)}행)")

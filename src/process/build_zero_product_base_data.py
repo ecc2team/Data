@@ -64,13 +64,20 @@ def load_ingredient_keywords(path) -> dict[str, list[str]]:
     """
     ingredient.csv(risk_level/ingredient_type)를 등급 판정용 키워드 리스트로 변환.
     하드코딩 리스트 대신 이걸 쓰면, ingredient.csv 수정 시 등급 로직도 자동으로 최신화됨.
+
+    NOTE: ALLERGEN(우유/계란/밀/대두/땅콩/아몬드/호두/복숭아)은 risk_level이
+    WARNING이지만 등급 판정과는 무관한 개인화 정보라서, COLOR와 동일하게
+    blood_sugar_traps 집계에서 제외해야 함. 제외하지 않으면 밀가루/우유가
+    들어간 빵류가 전부 "혈당 트랩 성분 포함"으로 오판되어 3등급으로
+    강등되는 문제가 생김 (알레르기 유무와 제로 등급은 별개 축).
     """
     ingredient_df = pd.read_csv(path)
 
     premium = ingredient_df.loc[ingredient_df["risk_level"] == "PREMIUM", "name"].tolist()
     synthetic = ingredient_df.loc[ingredient_df["risk_level"] == "GENERAL", "name"].tolist()
     blood_sugar_traps = ingredient_df.loc[
-        (ingredient_df["risk_level"] == "WARNING") & (ingredient_df["ingredient_type"] != "COLOR"),
+        (ingredient_df["risk_level"] == "WARNING")
+        & (~ingredient_df["ingredient_type"].isin(["COLOR", "ALLERGEN"])),
         "name",
     ].tolist()
     additive_traps = ingredient_df.loc[ingredient_df["ingredient_type"] == "COLOR", "name"].tolist()
