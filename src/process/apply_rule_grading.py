@@ -68,8 +68,8 @@ if __name__ == "__main__":
 
     df_result = apply_rule_based_grading(df)
 
-    ensure_dir(OUTPUTS_DIR)
-    output_path = OUTPUTS_DIR / "integrated_final_validation.csv"
+    ensure_dir(PROCESSED_DATA_DIR)
+    output_path = PROCESSED_DATA_DIR / "integrated_final_validation.csv"
     df_result.to_csv(output_path, index=False, encoding="utf-8-sig")
     print(f"\n파일 저장 완료: {output_path}")
 

@@ -9,7 +9,11 @@ ingredient.csv, product_table_data.csv, product_ingredient_mapping.csv
   2. category 적재(upsert) + category_id 매핑
   3. product 적재 (score/summary는 임시 placeholder로 채움 - 아래 설명)
   4. product_ingredient 적재
-  5. product.score / product.summary 계산 및 UPDATE (구 product_score.py)
+  5. product.score / product.summary 계산 및 UPDATE + grade-ingredient 모순 로그
+
+NOTE: 이 5단계가 예전 product_score.py를 완전히 흡수했으므로 (score/summary 계산 +
+grade-ingredient 모순 체크 모두 포함) product_score.py는 삭제함. score/summary만
+다시 계산하고 싶으면 `--no-truncate`로 이 스크립트의 5단계만 재실행하면 된다.
 
 score/summary를 마지막 단계로 분리한 이유
 ----------------------------------------
@@ -35,7 +39,7 @@ uk_ingredient_code, uk_product_external_code, uk_product_ingredient 유니크
 건너뛰고 이어서 INSERT만 시도한다(빈 테이블 최초 적재, 혹은 5단계만 다시
 돌리고 싶을 때 사용).
 
-score/summary 계산 방식 (5단계, 구 product_score.py 로직 그대로)
+score/summary 계산 방식 (5단계)
 ------------------------------------------------------------
 1. product.grade(1~3)로 점수 밴드를 정함: 1->90~100, 2->70~89, 3->40~69
 2. 밴드 안에서 ingredient.risk_level 분포(PREMIUM/WARNING 개수)를
@@ -44,6 +48,16 @@ score/summary 계산 방식 (5단계, 구 product_score.py 로직 그대로)
 4. ALLERGEN 타입(우유/계란/밀/대두/땅콩/아몬드/호두/복숭아)은 COLOR와
    동일하게 premium/warning 집계에서 제외 - 알레르기 유무는 개인화
    정보라 전체 상품 점수에 섞이면 안 됨
+
+grade와 premium/warning_count는 서로 다른 파이프라인에서 나온 독립적인 값이다
+(grade는 build_zero_product_base_data.py가 원재료 원문 텍스트 + 실제 당류/칼로리
+수치로 판정, premium/warning_count는 여기서 product_ingredient를 통해 ingredient
+워치리스트와 매칭한 결과). 그래서 "grade=3(가짜 제로 주의)인데 매칭된 WARNING
+성분은 하나도 없음" 같은 조합이 흔하게 나온다. build_summary()는 이 경우
+product.sugar/product.calories(둘 다 이미 product 테이블에 있음)로 실제 초과
+여부를 다시 확인해서, "무난하다"거나 "프리미엄 성분 위주"라고 해놓고 바로 뒤에서
+"가짜 제로일 가능성이 있다"고 뒤집는 모순 문장이 나오지 않도록 한다.
+(자세한 이유는 exceeds_zero_threshold()/build_summary() 주석 참고)
 
 category_id 매핑
 ----------------
@@ -64,8 +78,8 @@ category 테이블을 먼저 upsert(이미 있는 이름은 재사용, 없으면
 
 사용법
 ------
-python src/loader/load_all_to_supabase.py                # 기존 데이터 정리 후 전체 재적재 (1~5단계)
-python src/loader/load_all_to_supabase.py --no-truncate   # 정리 없이 이어서 insert (빈 테이블 최초 적재, 또는 재시도용)
+python src/process/load_all_to_supabase.py                # 기존 데이터 정리 후 전체 재적재 (1~5단계)
+python src/process/load_all_to_supabase.py --no-truncate   # 정리 없이 이어서 insert (빈 테이블 최초 적재, 또는 재시도용)
 """
 
 import argparse
@@ -103,8 +117,14 @@ GRADE_VERDICT = {
     3: "가짜 제로일 가능성이 있으니 성분표를 꼭 확인하세요.",
 }
 # 성분 개수가 이 percentile에 도달하면 밴드 끝(ceiling/floor)에 도달.
-# 등급별 실제 분포에서 자동으로 뽑음 (product_score.py와 동일 기준)
+# 등급별 실제 분포에서 자동으로 뽑음.
 SATURATION_PERCENTILE = 0.95
+
+# grade=3인데 매칭된 WARNING 성분이 없을 때, 실제로 당류/칼로리 초과가 원인인지
+# 확인하는 기준. build_zero_product_base_data.py의 pass_sugar(<0.5)/pass_calorie(<5.0)와
+# 동일한 기준을 반대로 적용한 값 (초과 여부 판단이므로 >=).
+SUGAR_ZERO_THRESHOLD = 0.5
+CALORIE_ZERO_THRESHOLD = 5.0
 
 
 # =====================================================
@@ -295,7 +315,9 @@ def load_product_ingredient(conn) -> None:
 def fetch_product_ingredient_stats(conn) -> pd.DataFrame:
     """
     product당 1행. premium_count/warning_count는 score 계산용,
-    premium_names/warning_names는 summary 조립용.
+    premium_names/warning_names는 summary 조립용, sugar/calories는
+    build_summary()에서 grade=3인데 매칭된 WARNING 성분이 없을 때 실제
+    초과 여부를 설명하는 용도 (exceeds_zero_threshold() 참고).
 
     NOTE: warning_count/warning_names 필터에서 COLOR와 ALLERGEN을 함께
     제외함. ALLERGEN(우유/계란/밀/대두/땅콩/아몬드/호두/복숭아)은 risk_level이
@@ -308,6 +330,8 @@ def fetch_product_ingredient_stats(conn) -> pd.DataFrame:
             p.id AS product_id,
             p.grade,
             p.warning_additive,
+            p.sugar,
+            p.calories,
             COUNT(i.id) FILTER (WHERE i.risk_level = 'PREMIUM') AS premium_count,
             COUNT(i.id) FILTER (
                 WHERE i.risk_level = 'WARNING' AND i.ingredient_type NOT IN ('COLOR', 'ALLERGEN')
@@ -327,7 +351,7 @@ def fetch_product_ingredient_stats(conn) -> pd.DataFrame:
         LEFT JOIN product_ingredient pi ON pi.product_id = p.id
         LEFT JOIN ingredient i ON i.id = pi.ingredient_id
         WHERE p.deleted_at IS NULL
-        GROUP BY p.id, p.grade, p.warning_additive
+        GROUP BY p.id, p.grade, p.warning_additive, p.sugar, p.calories
     """
     return pd.read_sql(query, conn)
 
@@ -366,14 +390,40 @@ def is_near_saturation(row, saturation: dict) -> bool:
     return row["premium_count"] >= premium_sat
 
 
+def exceeds_zero_threshold(row) -> bool:
+    """실제 당류/칼로리가 '제로' 표시 기준을 초과하는지.
+
+    grade=3(가짜 제로 주의)인데 매칭된 WARNING 성분이 하나도 없는 경우가 흔한데
+    (grade는 이 파일 상단 설명대로 sugar/calories 실측치로도 3이 될 수 있어서),
+    이때 "무난하다"/"프리미엄 성분 위주"라고 써버리면 바로 뒤에 붙는 grade=3
+    verdict("가짜 제로일 가능성이...")와 문장이 모순된다. 실제 초과 사실을
+    확인해서 모순 없는 문장을 만드는 데 씀."""
+    sugar, calories = row.get("sugar"), row.get("calories")
+    over_sugar = pd.notna(sugar) and sugar >= SUGAR_ZERO_THRESHOLD
+    over_calorie = pd.notna(calories) and calories >= CALORIE_ZERO_THRESHOLD
+    return bool(over_sugar or over_calorie)
+
+
 def build_summary(row, saturation: dict) -> str:
     premium_names = row["premium_names"] or []
     warning_names = row["warning_names"] or []
+    # warning_additive는 product_table_data.csv 생성 단계에서 원재료 원문 텍스트로
+    # 판정한 별도 플래그라 warning_names(=ingredient 워치리스트 매칭)와 항상
+    # 같이 붙어있지는 않음. 즉 grade=1(프리미엄)인데 warning_additive만 True인
+    # 케이스도 가능하므로 둘 다 확인해야 함 (하나만 보면 "믿고 선택하세요"
+    # 문구가 그대로 나가버리는 모순이 생김).
+    has_warning_signal = bool(warning_names) or bool(row["warning_additive"])
 
-    if row["grade"] == 1 and warning_names:
-        names = ", ".join(warning_names[:2])
+    # grade=1(프리미엄)인데 우려 신호가 있는 모순 케이스는
+    # "믿고 선택하세요" 문구를 그대로 못 씀 -> 신중 문구로 별도 처리
+    if row["grade"] == 1 and has_warning_signal:
+        if warning_names:
+            names = ", ".join(warning_names[:2])
+            reason = f"{names} 등 혈당에 영향을 줄 수 있는 성분이"
+        else:
+            reason = "카라멜색소 등 우려 첨가물이"
         return (
-            f"{names} 등 혈당에 영향을 줄 수 있는 성분이 포함되어 있어요. "
+            f"{reason} 포함되어 있어요. "
             f"등급은 프리미엄이지만 성분표를 한 번 더 확인해보는 걸 추천해요."
         )
 
@@ -382,13 +432,68 @@ def build_summary(row, saturation: dict) -> str:
     elif warning_names:
         names = ", ".join(warning_names[:2])
         feature = f"{names} 등의 성분이 일부 포함되어 있어"
+    elif row["grade"] == 3 and exceeds_zero_threshold(row):
+        # 매칭된 WARNING 성분은 없지만 실제 당류/칼로리가 기준을 넘어서 3등급인 케이스.
+        # 이유를 그대로 말해줘야 뒤에 붙는 verdict과 모순이 안 생김.
+        feature = "표시된 '제로'와 달리 실제 당류 또는 칼로리가 기준치를 초과해"
     elif premium_names and is_near_saturation(row, saturation):
         names = ", ".join(premium_names[:2])
-        feature = f"{names} 등 프리미엄 성분 위주로 구성되어 있어"
+        if row["grade"] == 3:
+            # 매칭된 원재료만 보면 프리미엄 성분 위주인데 등급은 3인 모순 케이스.
+            # flag_grade_ingredient_conflicts()의 grade3_but_only_premium과 동일 케이스라
+            # "프리미엄 위주라 안전하다"는 인상을 주지 않도록 문구를 분리함.
+            feature = f"{names} 등 프리미엄 성분이 매칭되긴 했지만 다른 기준에서 문제가 발견되어"
+        else:
+            feature = f"{names} 등 프리미엄 성분 위주로 구성되어 있어"
+    elif row["grade"] == 3:
+        # 매칭된 성분도, 실제 당류/칼로리 초과도 없는 잔여 모순 케이스.
+        # "무난하다"고 단정하면 verdict과 모순되므로 등급 산정 기준이 원인임을 명시.
+        feature = "확인된 원재료만으로는 특별한 문제가 보이지 않지만, 등급 산정 기준상 주의가 필요해"
     else:
         feature = "특별한 감미료 이슈 없이 무난하게 구성되어 있어"
 
     return f"{feature}, {GRADE_VERDICT[row['grade']]}"
+
+
+def flag_grade_ingredient_conflicts(df: pd.DataFrame) -> pd.DataFrame:
+    """grade와 ingredient.risk_level 매칭이 서로 모순되는 케이스를 찾아 로그로 남긴다.
+
+    grade는 product_table_data.csv 생성 스크립트(build_zero_product_base_data.py /
+    apply_rule_grading.py)의 룰기반_등급을 그대로 매핑한 값이라, 여기서 join하는
+    ingredient.risk_level(PREMIUM/WARNING) 워치리스트와는 독립적인 파이프라인에서
+    나온다. 그래서 아래 같은 조합이 로직 버그 없이도 나올 수 있다.
+    이 함수는 grade 값을 고치지 않는다 (grade 산정 로직은 이 스크립트 밖에 있어서
+    여기서 손댈 수 없음). 대신 모순 건수를 눈에 보이게 로그로 남겨서, 룰기반_등급
+    쪽을 나중에 재검토할 때 근거 자료로 쓸 수 있게 한다. score/summary 값 자체는
+    건드리지 않는다 (summary의 모순 문장 자체는 build_summary()에서 별도로 처리).
+
+    모순 정의:
+    - grade 1(프리미엄) + warning_count > 0
+    - grade 3(가짜 제로 주의) + premium_count > 0 이고 warning_count == 0
+      (경고 성분 없이 프리미엄 성분만 있는데 최하 등급인 경우)
+    """
+    grade1_with_warning = df[(df["grade"] == 1) & (df["warning_count"] > 0)].copy()
+    grade1_with_warning["conflict_type"] = "grade1_but_has_warning"
+
+    grade3_without_warning = df[
+        (df["grade"] == 3) & (df["premium_count"] > 0) & (df["warning_count"] == 0)
+    ].copy()
+    grade3_without_warning["conflict_type"] = "grade3_but_only_premium"
+
+    conflicts = pd.concat([grade1_with_warning, grade3_without_warning], ignore_index=True)
+
+    if len(conflicts) == 0:
+        print("\n  grade-ingredient 모순 케이스: 없음")
+        return conflicts
+
+    print(f"\n  ⚠️  grade-ingredient 모순 케이스: {len(conflicts)}건")
+    for conflict_type, sub in conflicts.groupby("conflict_type"):
+        print(f"    - {conflict_type}: {len(sub)}건")
+    print("    (grade는 product_table_data.csv의 룰기반_등급에서 오고,")
+    print("     ingredient.risk_level 매칭과는 독립적이라 발생 가능. score/summary는 미수정.")
+    print("     룰기반_등급 산정 로직 재검토용으로 아래 CSV 확인)")
+
+    return conflicts
 
 
 def compute_and_update_score(conn) -> None:
@@ -401,6 +506,12 @@ def compute_and_update_score(conn) -> None:
 
     df["score"] = df.apply(lambda row: compute_score(row, saturation), axis=1)
     df["summary"] = df.apply(lambda row: build_summary(row, saturation), axis=1)
+
+    conflicts = flag_grade_ingredient_conflicts(df)
+    if len(conflicts) > 0:
+        conflicts_path = "grade_ingredient_conflicts.csv"
+        conflicts.to_csv(conflicts_path, index=False, encoding="utf-8-sig")
+        print(f"    -> 상세 내역 저장: {conflicts_path} (팀/멘토님 공유용)")
 
     with conn.cursor() as cur:
         cur.execute("""
