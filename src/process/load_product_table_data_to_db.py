@@ -22,7 +22,7 @@ from pathlib import Path
 import pandas as pd
 import psycopg2
 
-CSV_PATH = Path("data/processed/db_ready_data.csv")
+CSV_PATH = Path("data/processed/product_table_data.csv")
 
 # product 테이블 DDL 컬럼 순서와 동일하게 맞춤 (id, image_url, deleted_at은 제외 - 자동/nullable)
 COLUMNS = [

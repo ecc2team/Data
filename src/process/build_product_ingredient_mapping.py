@@ -1,17 +1,23 @@
+import sys
+from pathlib import Path
+
+# 프로젝트 루트 경로를 sys.path에 추가
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+
 import pandas as pd
 import numpy as np
-
 from src.config import DATA_DIR, ensure_dir
 
 # ==========================================
-# 지수 표기법 복구 함수 (이미 손상된 문자열 복구용)
+# 지수 표기법 복구 함수
 # ==========================================
 def fix_scientific_notation(val):
     if pd.isna(val):
         return val
     val_str = str(val).strip()
     try:
-        # 2E+13 같은 형태를 다시 숫자로 폈다가 문자열로 변환
         return str(int(float(val_str)))
     except ValueError:
         return val_str
@@ -19,7 +25,7 @@ def fix_scientific_notation(val):
 def main():
     print("🚀 대체당 및 트랩 성분 매핑 데이터 추출을 시작합니다...")
 
-    # 2. 프로젝트 구조에 맞춘 파일 경로 설정
+    # 2. 파일 경로 설정
     interim_dir = DATA_DIR / "interim"
     processed_dir = DATA_DIR / "processed"
     ensure_dir(processed_dir)
@@ -38,7 +44,7 @@ def main():
     final_df = pd.read_csv(final_grade_file, dtype=str)
     base_df = pd.read_csv(base_data_file, dtype=str)
 
-    # 4. 스마트 조인(Merge) 키 감지 로직
+    # 4. 스마트 조인 키 감지 로직
     id_candidates = ['품목제조보고번호', 'external_food_code', '식품코드', 'PRDLST_REPORT_NO']
     
     common_keys = [c for c in id_candidates if c in final_df.columns and c in base_df.columns]
@@ -55,11 +61,10 @@ def main():
 
     print(f"✅ 기준 키 감지 완료: final_df['{left_key}'] <-> base_df['{right_key}']")
 
-    # Merge 전/후에 조인 키의 지수 표기법을 온전한 숫자로 복구
     final_df[left_key] = final_df[left_key].apply(fix_scientific_notation)
     base_df[right_key] = base_df[right_key].apply(fix_scientific_notation)
 
-    # 5. 컬럼 충돌 방지 및 안전한 병합
+    # 5. 병합
     merge_cols = [right_key]
     if 'RAWMTRL_NM' in base_df.columns and 'RAWMTRL_NM' not in final_df.columns:
         merge_cols.append('RAWMTRL_NM')
@@ -79,7 +84,7 @@ def main():
         merged_df = final_df
 
     # ==========================================
-    # [핵심 수정] 새로운 16종 마스터 매핑 딕셔너리 반영
+    # 6. 마스터 매핑 딕셔너리
     # ==========================================
     sweetener_mapping = {
         "알룰로스": "ALLULOSE", "알룰로오스": "ALLULOSE", "액상알룰로스": "ALLULOSE", "d-알룰로스": "ALLULOSE", "D-알룰로스": "ALLULOSE",
@@ -100,10 +105,11 @@ def main():
         "카라멜색소": "CARAMEL_COLOR", "캐러멜색소": "CARAMEL_COLOR", "카라멜색소I": "CARAMEL_COLOR", "카라멜색소IV": "CARAMEL_COLOR"
     }
     
-    # 딕셔너리 키(한글명)를 기반으로 긴 단어부터 검색 (예: '효소처리스테비아'가 '스테비아'보다 먼저 검색되도록)
     sweeteners_sorted = sorted(sweetener_mapping.keys(), key=len, reverse=True)
 
-    # 7. 제품별 대체당 매핑 추출
+    # ==========================================
+    # 7. 제품별 대체당 매핑 및 순서(Sequence) 추출
+    # ==========================================
     print("원재료명에서 타겟 성분을 추출하고 순서를 부여하는 중...")
     mapping_data = []
 
@@ -121,7 +127,7 @@ def main():
             
         found_spans = [] 
         
-        # 텍스트 탐색 (중복 포함 방지)
+        # 텍스트 탐색
         for s in sweeteners_sorted:
             start = 0
             while True:
@@ -130,8 +136,10 @@ def main():
                     break
                 
                 end = pos + len(s)
+                
+                # [수정] 교집합 기반 정확한 겹침 판별
                 is_overlapping = any(
-                    existing_start <= pos and end <= existing_end 
+                    pos < existing_end and end > existing_start 
                     for existing_start, existing_end, _ in found_spans
                 )
                 
@@ -140,19 +148,30 @@ def main():
                     
                 start = pos + 1
 
-        # 원재료명에 적힌 순서대로 정렬
+        # 원재료명에 적힌 순서대로 1차 정렬 (pos 기준)
         found_spans.sort(key=lambda x: x[0])
         
+        # [추가] DB 다대다 매핑 무결성을 위한 중복 성분 코드 필터링
+        # 앞쪽 순서에 등장한 타겟 성분만 취하고, 뒤에 나오는 동의어/파생어는 무시
+        unique_ingredients = set()
+        final_sequence_spans = []
+        
+        for pos, end, name in found_spans:
+            target_code = sweetener_mapping[name]
+            if target_code not in unique_ingredients:
+                unique_ingredients.add(target_code)
+                final_sequence_spans.append((pos, end, name, target_code))
+        
         # Sequence 번호 부여
-        for seq_num, (_, _, name) in enumerate(found_spans, start=1):
+        for seq_num, (_, _, name, code) in enumerate(final_sequence_spans, start=1):
             mapping_data.append({
                 "external_food_code": ext_code,
-                "ingredient_code": sweetener_mapping[name], 
+                "ingredient_code": code, 
                 "ingredient_name": name,
                 "sequence": seq_num  
             })
 
-    # 8. 결과 저장 (utf-8-sig로 저장하여 텍스트 에디터에서 한글 깨짐 방지)
+    # 8. 결과 저장
     product_ingredient_df = pd.DataFrame(mapping_data)
     product_ingredient_df.to_csv(output_file, index=False, encoding='utf-8-sig')
 
