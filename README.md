@@ -79,7 +79,7 @@ python src/collect/collect_food_nutrition.py
 ### 4.2 제로 제품 기준 데이터 생성
 
 ```bash
-python src/process/merge_whitelist_v4.py
+python src/process/build_zero_product_base_data.py
 ```
 
 이 단계에서 다음 파일이 생성됩니다.
@@ -91,7 +91,7 @@ python src/process/merge_whitelist_v4.py
 ### 4.3 룰 기반 등급 분류 및 AI 검증
 
 ```bash
-python src/process/zeropick_final_graded.py
+python src/process/grade_products_with_rules_and_ai.py
 ```
 
 이 단계에서 `data/processed/integrated_final_validation.csv`가 생성됩니다.
@@ -99,13 +99,13 @@ python src/process/zeropick_final_graded.py
 ### 4.4 DB 적재용 데이터 생성
 
 ```bash
-python src/process/db_ready_data.py
-python src/process/final_ingredient.py
+python src/process/prepare_product_table_data.py
+python src/process/build_product_ingredient_mapping.py
 ```
 
 생성되는 주요 파일:
 
-- `data/processed/db_ready_data.csv`
+- `data/processed/product_table_data.csv`
 - `data/processed/product_ingredient_mapping.csv`
 
 ### 4.5 로컬 DB 적재
@@ -118,7 +118,7 @@ python src/loader/load_all.py
 
 이 스크립트는 다음 두 파일을 순차적으로 적재합니다.
 
-- `data/processed/db_ready_data.csv`
+- `data/processed/product_table_data.csv`
 - `data/processed/integrated_final_validation.csv`
 
 ### 4.6 시각화 결과물 생성
@@ -143,7 +143,7 @@ python src/visualization/chart1_chart2_visualization.py
 | 데이터 수집 | `data/raw/*.csv` |
 | 기본 데이터 구축 | `data/processed/zeropick_base_data_v4.csv` |
 | 등급/AI 검증 | `outputs/integrated_final_validation.csv` |
-| DB 적재용 데이터 | `data/processed/db_ready_data.csv` |
+| DB 적재용 데이터 | `data/processed/product_table_data.csv` |
 | 시각화 | `outputs/charts/*.png` |
 
 ---

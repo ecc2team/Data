@@ -6,7 +6,7 @@ import psycopg2
 from src.config import DATA_DIR, DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, PROCESSED_DATA_DIR
 
 INGREDIENT_CSV = DATA_DIR / "final" / "ingredient.csv"
-PRODUCT_CSV = PROCESSED_DATA_DIR / "db_ready_data.csv"
+PRODUCT_CSV = PROCESSED_DATA_DIR / "product_table_data.csv"
 
 # ── 로컬 Docker DB 접속 ───────────────────────────
 conn = psycopg2.connect(
